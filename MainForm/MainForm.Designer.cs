@@ -32,6 +32,7 @@
             BtnRun = new Button();
             BtnPause = new Button();
             BtnStop = new Button();
+            LabScannerState = new Label();
             SuspendLayout();
             // 
             // TvFolderView
@@ -49,6 +50,7 @@
             BtnRun.TabIndex = 1;
             BtnRun.Text = "Run";
             BtnRun.UseVisualStyleBackColor = true;
+            BtnRun.Click += BtnRun_Click;
             // 
             // BtnPause
             // 
@@ -58,6 +60,7 @@
             BtnPause.TabIndex = 2;
             BtnPause.Text = "Pause";
             BtnPause.UseVisualStyleBackColor = true;
+            BtnPause.Click += BtnPause_Click;
             // 
             // BtnStop
             // 
@@ -67,12 +70,23 @@
             BtnStop.TabIndex = 3;
             BtnStop.Text = "Stop";
             BtnStop.UseVisualStyleBackColor = true;
+            BtnStop.Click += BtnStop_Click;
+            // 
+            // LabScannerState
+            // 
+            LabScannerState.AutoSize = true;
+            LabScannerState.Location = new Point(476, 438);
+            LabScannerState.Name = "LabScannerState";
+            LabScannerState.Size = new Size(121, 25);
+            LabScannerState.TabIndex = 4;
+            LabScannerState.Text = "Scanner state:";
             // 
             // MainForm
             // 
             AutoScaleDimensions = new SizeF(10F, 25F);
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(912, 544);
+            Controls.Add(LabScannerState);
             Controls.Add(BtnStop);
             Controls.Add(BtnPause);
             Controls.Add(BtnRun);
@@ -80,6 +94,7 @@
             Name = "MainForm";
             Text = "Form1";
             ResumeLayout(false);
+            PerformLayout();
         }
 
         #endregion
@@ -88,5 +103,6 @@
         private Button BtnRun;
         private Button BtnPause;
         private Button BtnStop;
+        private Label LabScannerState;
     }
 }

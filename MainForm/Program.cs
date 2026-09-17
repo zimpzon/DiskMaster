@@ -14,8 +14,7 @@ namespace MainForm
             var host = Host.CreateDefaultBuilder()
                 .ConfigureServices((context, services) =>
                 {
-                    // Register your services here
-                    services.AddSingleton<FolderExplorer>();
+                    services.AddSingleton<FolderExplorerFactory>();
                     services.AddTransient<MainForm>();
                 })
                 .Build();
