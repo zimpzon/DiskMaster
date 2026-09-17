@@ -67,7 +67,8 @@ namespace DiskMasterLib
         public void Pause()
         {
             ThrowIfDisposed();
-            if (Volatile.Read(in _runState) != (int)RunState.Running)
+            var state = (RunState)Volatile.Read(in _runState);
+            if (state != RunState.Running)
                 throw new InvalidOperationException($"Must be running to pause");
 
             SetRunState(RunState.PausePending);
@@ -77,7 +78,8 @@ namespace DiskMasterLib
         public void Stop()
         {
             ThrowIfDisposed();
-            if (Volatile.Read(in _runState) != (int)RunState.Running)
+            var state = (RunState)Volatile.Read(in _runState);
+            if (state != RunState.Running && state != RunState.Paused)
                 throw new InvalidOperationException($"Must be running to stop");
 
             SetRunState(RunState.StopPending);
