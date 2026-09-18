@@ -9,5 +9,6 @@
         StopPending,
         Stopped,
         Completed,
+        Aborted,
     }
 }

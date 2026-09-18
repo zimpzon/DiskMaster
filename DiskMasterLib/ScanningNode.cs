@@ -1,6 +1,4 @@
-﻿using System.ComponentModel;
-
-namespace DiskMasterLib
+﻿namespace DiskMasterLib
 {
     public interface IScanningNode
     {
@@ -10,9 +8,12 @@ namespace DiskMasterLib
 
     internal class ScanningNode : IScanningNode
     {
-        public ScanningNode Parent { get; set; }
-        public List<ScanningNode> Children { get; set; }
-        public string FolderName { get; set; }
+        public static readonly ScanningNode Empty = new();
+
+        public ScanningNode? Parent { get; set; }
+        public List<ScanningNode> Children { get; set; } = [];
+        public string FolderName { get; set; } = string.Empty;
         public long FolderSizeBytes { get; set; }
+        public bool CannotAccess { get; set; }
     }
 }

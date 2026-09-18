@@ -33,6 +33,10 @@
             BtnPause = new Button();
             BtnStop = new Button();
             LabScannerState = new Label();
+            LabFoldersInQueue = new Label();
+            LabCurrentFolder = new Label();
+            LabFoldersProcessed = new Label();
+            RichTextLog = new RichTextBox();
             SuspendLayout();
             // 
             // TvFolderView
@@ -77,15 +81,54 @@
             LabScannerState.AutoSize = true;
             LabScannerState.Location = new Point(476, 438);
             LabScannerState.Name = "LabScannerState";
-            LabScannerState.Size = new Size(121, 25);
+            LabScannerState.Size = new Size(176, 25);
             LabScannerState.TabIndex = 4;
-            LabScannerState.Text = "Scanner state:";
+            LabScannerState.Text = "Scanner state: (none)";
+            // 
+            // LabFoldersInQueue
+            // 
+            LabFoldersInQueue.AutoSize = true;
+            LabFoldersInQueue.Location = new Point(476, 394);
+            LabFoldersInQueue.Name = "LabFoldersInQueue";
+            LabFoldersInQueue.Size = new Size(162, 25);
+            LabFoldersInQueue.TabIndex = 5;
+            LabFoldersInQueue.Text = "Folders in queue: 0";
+            // 
+            // LabCurrentFolder
+            // 
+            LabCurrentFolder.AutoSize = true;
+            LabCurrentFolder.Location = new Point(477, 355);
+            LabCurrentFolder.Name = "LabCurrentFolder";
+            LabCurrentFolder.Size = new Size(181, 25);
+            LabCurrentFolder.TabIndex = 6;
+            LabCurrentFolder.Text = "Current folder: (none)";
+            // 
+            // LabFoldersProcessed
+            // 
+            LabFoldersProcessed.AutoSize = true;
+            LabFoldersProcessed.Location = new Point(476, 315);
+            LabFoldersProcessed.Name = "LabFoldersProcessed";
+            LabFoldersProcessed.Size = new Size(175, 25);
+            LabFoldersProcessed.TabIndex = 7;
+            LabFoldersProcessed.Text = "Folders processed: 0";
+            // 
+            // RichTextLog
+            // 
+            RichTextLog.Location = new Point(947, 117);
+            RichTextLog.Name = "RichTextLog";
+            RichTextLog.Size = new Size(370, 338);
+            RichTextLog.TabIndex = 8;
+            RichTextLog.Text = "";
             // 
             // MainForm
             // 
             AutoScaleDimensions = new SizeF(10F, 25F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(912, 544);
+            ClientSize = new Size(1468, 570);
+            Controls.Add(RichTextLog);
+            Controls.Add(LabFoldersProcessed);
+            Controls.Add(LabCurrentFolder);
+            Controls.Add(LabFoldersInQueue);
             Controls.Add(LabScannerState);
             Controls.Add(BtnStop);
             Controls.Add(BtnPause);
@@ -93,6 +136,7 @@
             Controls.Add(TvFolderView);
             Name = "MainForm";
             Text = "Form1";
+            FormClosing += MainForm_FormClosing;
             ResumeLayout(false);
             PerformLayout();
         }
@@ -104,5 +148,9 @@
         private Button BtnPause;
         private Button BtnStop;
         private Label LabScannerState;
+        private Label LabFoldersInQueue;
+        private Label LabCurrentFolder;
+        private Label LabFoldersProcessed;
+        private RichTextBox RichTextLog;
     }
 }

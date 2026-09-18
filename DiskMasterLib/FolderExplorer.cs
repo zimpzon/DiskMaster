@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace DiskMasterLib
 {
@@ -6,18 +7,28 @@ namespace DiskMasterLib
     {
         public RunState RunState => (RunState)_runState;
 
+        public long FoldersInQueue => _pendingFolders.Count;
+        public long TotalFoldersFound => _scannerStats.TotalFoldersFound;
+        public long TotalBytesFound => _scannerStats.TotalBytesFound;
+
+        private ScannerStats _scannerStats = new();
+
         private int _runState = (int)RunState.Stopped;
         private ConcurrentQueue<string> _pendingFolders = new();
-        private Thread _scanningThread ;
+        private Thread _scanningThread;
         private ThreadWaiter _threadPauseWaiter = new(false);
         private ThreadWaiter _threadWaitForRunWaiter = new(false);
         private EventFlag _stopFlag = new();
         private EventFlag _disposeFlag = new();
         private Action<RunState> _onRunStateChanged;
         private Action<IScanningNode> _onNodeUpdated;
+        private ScanningNode _rootNode = ScanningNode.Empty;
 
         public FolderExplorer(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated)
         {
+            ArgumentNullException.ThrowIfNull(onRunStateChanged, nameof(onRunStateChanged));
+            ArgumentNullException.ThrowIfNull(onNodeUpdated, nameof(onNodeUpdated));
+
             _onRunStateChanged = onRunStateChanged;
             _onNodeUpdated = onNodeUpdated;
     
@@ -39,22 +50,36 @@ namespace DiskMasterLib
             _onRunStateChanged((RunState)_runState);
         }
 
-        private void PrepareForCleanRun()
+        private void PrepareForNewRun()
         {
             SetRunState(RunState.WaitingForRun);
             _threadWaitForRunWaiter.SetWait();
             _threadPauseWaiter.SetNoWait();
             _stopFlag.Clear();
             _pendingFolders.Clear();
+            _scannerStats = new();
         }
+
+        private RunState GetRunState()
+            => (RunState)Volatile.Read(ref _runState);
 
         public void Run(string rootFolder)
         {
             ThrowIfDisposed();
-            if (Volatile.Read(in _runState) == (int)RunState.Running)
+
+            var state = GetRunState();
+            if (state == RunState.Running)
                 throw new InvalidOperationException($"Already running");
 
-            PrepareForCleanRun();
+            bool isResume = state == RunState.Paused;
+            if (isResume)
+            {
+                SetRunState(RunState.Running);
+                _threadPauseWaiter.SetNoWait();
+                return;
+            }
+
+            PrepareForNewRun();
 
             SetRunState(RunState.Running);
             _pendingFolders.Enqueue(rootFolder);
@@ -67,7 +92,8 @@ namespace DiskMasterLib
         public void Pause()
         {
             ThrowIfDisposed();
-            var state = (RunState)Volatile.Read(in _runState);
+
+            var state = GetRunState();
             if (state != RunState.Running)
                 throw new InvalidOperationException($"Must be running to pause");
 
@@ -78,7 +104,8 @@ namespace DiskMasterLib
         public void Stop()
         {
             ThrowIfDisposed();
-            var state = (RunState)Volatile.Read(in _runState);
+
+            var state = GetRunState();
             if (state != RunState.Running && state != RunState.Paused)
                 throw new InvalidOperationException($"Must be running to stop");
 
@@ -89,38 +116,83 @@ namespace DiskMasterLib
 
         private void ThreadMain()
         {
-            // Full scan loop
+            // Scan from beginning loop
             while (!_disposeFlag.IsSet())
             {
                 _threadWaitForRunWaiter.WaitIfSet();
 
-                // In process scan loop
+                // Folder scanning loop
                 while (true)
                 {
+                    if (_disposeFlag.IsSet())
+                    {
+                        break;
+                    }
+
+                    if (_stopFlag.IsSet())
+                    {
+                        SetRunState(RunState.Stopped);
+                        _threadWaitForRunWaiter.SetWait();
+                        break;
+                    }
+
+                    if (!_pendingFolders.TryDequeue(out string? currentFolder))
+                    {
+                        SetRunState(RunState.Completed);
+                        break;
+                    }
+
+                    if (currentFolder.Equals(@"C:\Windows", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var enumerationOptions = new EnumerationOptions {
+                            IgnoreInaccessible = true,
+                            ReturnSpecialDirectories = false,
+                        };
+
+                        var childFolders = Directory.GetDirectories(currentFolder, "*", enumerationOptions);
+                        foreach (var folder in childFolders)
+                        {
+                            if (!string.IsNullOrWhiteSpace(folder))
+                            {
+                                _pendingFolders.Enqueue(folder);
+                                _scannerStats.TotalFoldersFound++;
+                            }
+                        }
+                    }
+                    catch(Exception _) when (_ is UnauthorizedAccessException || _ is IOException)
+                    {
+                        ;
+                        // Add node with flag
+                        Debug.WriteLine(_.Message);
+                    }
+
+                    _onNodeUpdated(new ScanningNode { FolderName = currentFolder });
+
                     if (_threadPauseWaiter.WouldWait())
                     {
                         SetRunState(RunState.Paused);
                        _threadPauseWaiter.WaitIfSet();
                     }
-
-                    if (_stopFlag.IsSet() || _disposeFlag.IsSet())
-                    {
-                        SetRunState(RunState.Stopped);
-                        break;
-                    }
-
-                    Thread.Sleep(500);
                 }
             }
+
+            SetRunState(RunState.Aborted);
         }
 
+        /// <summary>
+        /// Dispose waits for the worker thread to exit. Callbacks could happen before is has exited so
+        /// if this is called from UI thread and callbacks also requires UI thread a deadlock could occur.
+        /// </summary>
         public void Dispose()
         {
             _disposeFlag.Set();
             _threadPauseWaiter.SetNoWait();
             _threadWaitForRunWaiter.SetNoWait();
-
-            _scanningThread.Join();
         }
     }
 }
