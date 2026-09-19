@@ -1,4 +1,4 @@
-using DiskMasterLib;
+﻿using DiskMasterLib;
 
 namespace MainForm
 {
@@ -6,6 +6,7 @@ namespace MainForm
     {
         private readonly FolderExplorer _folderExplorer;
         private bool _scannerAborted;
+        private int _updateModulus;
 
         public MainForm(FolderExplorerFactory folderExplorerFactory)
         {
@@ -15,6 +16,34 @@ namespace MainForm
             UpdateActionButtonStates(_folderExplorer.RunState);
             UpdateScannerStateLabel(_folderExplorer.RunState);
         }
+
+        // ---- Button handlers ----
+
+        private void BtnRun_Click(object sender, EventArgs e)
+        {
+            _folderExplorer.Run(@"C:\everquestlegends");
+        }
+
+        private void BtnPause_Click(object sender, EventArgs e)
+        {
+            _folderExplorer.Pause();
+        }
+
+        private void BtnStop_Click(object sender, EventArgs e)
+        {
+            _folderExplorer.Stop();
+        }
+
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (_scannerAborted)
+                return;
+
+            _folderExplorer.Dispose();
+            e.Cancel = true;
+        }
+
+        // ---- FolderExplorer callbacks (may arrive on the scanner's background thread) ----
 
         private void OnScannerRunStateChanged(RunState runState)
         {
@@ -32,15 +61,25 @@ namespace MainForm
             });
         }
 
-        private void UpdateScannerStateLabel(RunState runState)
-        {
-            LabScannerState.Text = $"Scanner state: {runState}";
-        }
-
-
         private void OnScannerCompleted()
         {
             UpdateScannerStats();
+        }
+
+        private void OnScannerNodeUpdated(IScanningNode node)
+        {
+            // Refreshing the UI on every folder is too slow, so only do it every 1000th update.
+            if (_updateModulus++ % 1000 != 0)
+                return;
+
+            UpdateScannerStats();
+        }
+
+        // ---- UI updates ----
+
+        private void UpdateScannerStateLabel(RunState runState)
+        {
+            LabScannerState.Text = $"Scanner state: {runState}";
         }
 
         private void UpdateScannerStats()
@@ -52,15 +91,6 @@ namespace MainForm
                 LabFilesFound.Text = $"Files found: {_folderExplorer.TotalFilesFound}";
                 LabSize.Text = $"Size: {FormatBytes(_folderExplorer.TotalBytesFound)}";
             });
-        }
-
-        int updateModulus;
-        private void OnScannerNodeUpdated(IScanningNode node)
-        {
-            if (updateModulus++ % 1000 != 0)
-                return;
-
-            UpdateScannerStats();
         }
 
         private void UpdateActionButtonStates(RunState runState)
@@ -85,12 +115,6 @@ namespace MainForm
                 runState == RunState.Paused;
         }
 
-        private async void BtnRun_Click(object sender, EventArgs e)
-        {
-            //_folderExplorer.Run(@"C:\Users\peter\source\repos\PythonChat\venv");
-            _folderExplorer.Run(@"C:\everquestlegends");
-        }
-
         private static string FormatBytes(long bytes)
         {
             const double Kb = 1024;
@@ -106,25 +130,6 @@ namespace MainForm
                 < (long)Tb => $"{bytes / Gb:F2} GB",
                 _ => $"{bytes / Tb:F2} TB"
             };
-        }
-
-        private void BtnPause_Click(object sender, EventArgs e)
-        {
-            _folderExplorer.Pause();
-        }
-
-        private void BtnStop_Click(object sender, EventArgs e)
-        {
-            _folderExplorer.Stop();
-        }
-
-        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            if (_scannerAborted)
-                return;
-
-            _folderExplorer.Dispose();
-            e.Cancel = true;
         }
     }
 }

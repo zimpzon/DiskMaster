@@ -5,25 +5,30 @@ namespace DiskMasterLib
 {
     public class FolderExplorer : IDisposable
     {
-        public RunState RunState => (RunState)Volatile.Read(ref _runState);
+        private const string ExcludedFolder = @"C:\Windows";
 
+        // ---- Public state ----
+
+        public RunState RunState => (RunState)Volatile.Read(ref _runState);
         public long FoldersInQueue => _pendingFolders.Count;
         public long TotalFoldersFound => _scannerStats.TotalFoldersFound;
         public long TotalFilesFound => _scannerStats.TotalFilesFound;
         public long TotalBytesFound => _scannerStats.TotalBytesFound;
 
-        private ScannerStats _scannerStats = new();
+        // ---- Fields ----
 
+        private readonly ConcurrentQueue<ScanningNode> _pendingFolders = new();
+        private readonly Thread _scanningThread;
+        private readonly ThreadWaiter _threadPauseWaiter = new(false);
+        private readonly ThreadWaiter _threadWaitForRunWaiter = new(false);
+        private readonly EventFlag _stopFlag = new();
+        private readonly EventFlag _disposeFlag = new();
+        private readonly Action<RunState> _onRunStateChanged;
+        private readonly Action<IScanningNode> _onNodeUpdated;
+        private readonly Action _onScannerCompleted;
+
+        private ScannerStats _scannerStats = new();
         private int _runState = (int)RunState.Stopped;
-        private ConcurrentQueue<ScanningNode> _pendingFolders = new();
-        private Thread _scanningThread;
-        private ThreadWaiter _threadPauseWaiter = new(false);
-        private ThreadWaiter _threadWaitForRunWaiter = new(false);
-        private EventFlag _stopFlag = new();
-        private EventFlag _disposeFlag = new();
-        private Action<RunState> _onRunStateChanged;
-        private Action<IScanningNode> _onNodeUpdated;
-        private Action _onScannerCompleted;
         private ScanningNode _rootNode = ScanningNode.Empty;
 
         public FolderExplorer(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated, Action onScannerCompleted)
@@ -35,7 +40,7 @@ namespace DiskMasterLib
             _onRunStateChanged = onRunStateChanged;
             _onNodeUpdated = onNodeUpdated;
             _onScannerCompleted = onScannerCompleted;
-    
+
             _scanningThread = new Thread(ThreadMain)
             {
                 Priority = ThreadPriority.BelowNormal
@@ -45,27 +50,7 @@ namespace DiskMasterLib
             _scanningThread.Start();
         }
 
-        private void SetRunState(RunState runState)
-        {
-            if (Volatile.Read(in _runState) == (int)runState)
-                return;
-
-            Volatile.Write(ref _runState, (int)runState);
-            _onRunStateChanged((RunState)_runState);
-        }
-
-        private void PrepareForNewRun()
-        {
-            SetRunState(RunState.WaitingForRun);
-            _threadWaitForRunWaiter.SetWait();
-            _threadPauseWaiter.SetNoWait();
-            _stopFlag.Clear();
-            _pendingFolders.Clear();
-            _scannerStats = new();
-        }
-
-        private RunState GetRunState()
-            => (RunState)Volatile.Read(ref _runState);
+        // ---- Public control API ----
 
         public void Run(string rootFolder)
         {
@@ -93,9 +78,6 @@ namespace DiskMasterLib
             _threadWaitForRunWaiter.SetNoWait();
         }
 
-        private void ThrowIfDisposed()
-            => ObjectDisposedException.ThrowIf(_disposeFlag.IsSet(), this);
-
         public void Pause()
         {
             ThrowIfDisposed();
@@ -121,7 +103,149 @@ namespace DiskMasterLib
             _stopFlag.Set();
         }
 
-        private void UpdateTreeWithFolderFileBytes(ScanningNode node, long fileBytes)
+        /// <summary>
+        /// Dispose waits for the worker thread to exit. Callbacks could happen before is has exited so
+        /// if this is called from UI thread and callbacks also requires UI thread a deadlock could occur.
+        /// </summary>
+        public void Dispose()
+        {
+            _disposeFlag.Set();
+            _threadPauseWaiter.SetNoWait();
+            _threadWaitForRunWaiter.SetNoWait();
+        }
+
+        // ---- Run-state bookkeeping ----
+
+        private RunState GetRunState()
+            => (RunState)Volatile.Read(ref _runState);
+
+        private void SetRunState(RunState runState)
+        {
+            if (Volatile.Read(in _runState) == (int)runState)
+                return;
+
+            Volatile.Write(ref _runState, (int)runState);
+            _onRunStateChanged((RunState)_runState);
+        }
+
+        private void PrepareForNewRun()
+        {
+            SetRunState(RunState.WaitingForRun);
+            _threadWaitForRunWaiter.SetWait();
+            _threadPauseWaiter.SetNoWait();
+            _stopFlag.Clear();
+            _pendingFolders.Clear();
+            _scannerStats = new();
+        }
+
+        private void ThrowIfDisposed()
+            => ObjectDisposedException.ThrowIf(_disposeFlag.IsSet(), this);
+
+        // ---- Worker thread: scans folders from _pendingFolders until stopped, disposed or drained ----
+
+        private void ThreadMain()
+        {
+            while (!_disposeFlag.IsSet())
+            {
+                _threadWaitForRunWaiter.WaitIfSet();
+                RunScanLoop();
+            }
+
+            SetRunState(RunState.Aborted);
+        }
+
+        private void RunScanLoop()
+        {
+            while (true)
+            {
+                if (_disposeFlag.IsSet())
+                    return;
+
+                if (_stopFlag.IsSet())
+                {
+                    SetRunState(RunState.Stopped);
+                    _threadWaitForRunWaiter.SetWait();
+                    return;
+                }
+
+                if (!_pendingFolders.TryDequeue(out var currentNode))
+                {
+                    SetRunState(RunState.Completed);
+                    _onScannerCompleted();
+                    _threadWaitForRunWaiter.SetWait();
+                    return;
+                }
+
+                if (currentNode.FolderName.Equals(ExcludedFolder, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!TryScanFiles(currentNode))
+                    continue;
+
+                EnqueueChildFolders(currentNode);
+
+                _onNodeUpdated(currentNode);
+
+                PauseIfRequested();
+            }
+        }
+
+        private bool TryScanFiles(ScanningNode node)
+        {
+            try
+            {
+                var files = Directory.GetFiles(node.FolderName).Select(f => new FileInfo(f)).ToList();
+                long fileBytes = files.Sum(f => f.Length);
+
+                _scannerStats.TotalBytesFound += fileBytes;
+                _scannerStats.TotalFilesFound += files.Count;
+                AddFileBytesToTree(node, fileBytes);
+                return true;
+            }
+            catch (Exception e) when (e is UnauthorizedAccessException || e is IOException)
+            {
+                // Folder is not accesible
+                node.ScanError = e;
+                Debug.WriteLine($"Cannot access files in folder {node.FolderName}: {e.Message}");
+                return false;
+            }
+        }
+
+        private void EnqueueChildFolders(ScanningNode node)
+        {
+            var options = new EnumerationOptions()
+            {
+                AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
+            };
+
+            List<string> childFolders;
+            try
+            {
+                childFolders = Directory.GetDirectories(node.FolderName, "*", options).ToList();
+            }
+            catch (Exception e)
+            {
+                // Unknown error enumerating directories, skip it.
+                // It could have been deleted or similar.
+                Debug.WriteLine($"Cannot get child directories for {node.FolderName} : {e.Message}");
+                node.ScanError = e;
+                return;
+            }
+
+            foreach (string folder in childFolders)
+            {
+                if (string.IsNullOrWhiteSpace(folder))
+                    continue;
+
+                var childNode = new ScanningNode { FolderName = folder, Parent = node };
+                node.Children.Add(childNode);
+
+                _pendingFolders.Enqueue(childNode);
+                _scannerStats.TotalFoldersFound++;
+            }
+        }
+
+        private static void AddFileBytesToTree(ScanningNode node, long fileBytes)
         {
             node.FileBytes += fileBytes;
             var parentNode = node.Parent;
@@ -132,111 +256,13 @@ namespace DiskMasterLib
             }
         }
 
-        private void ThreadMain()
+        private void PauseIfRequested()
         {
-            // Scan from beginning loop
-            while (!_disposeFlag.IsSet())
-            {
-                _threadWaitForRunWaiter.WaitIfSet();
-                ScanningNode currentNode = ScanningNode.Empty;
+            if (!_threadPauseWaiter.WouldWait())
+                return;
 
-                // Folder scanning loop
-                while (true)
-                {
-                    if (_disposeFlag.IsSet())
-                    {
-                        break;
-                    }
-
-                    if (_stopFlag.IsSet())
-                    {
-                        SetRunState(RunState.Stopped);
-                        _threadWaitForRunWaiter.SetWait();
-                        break;
-                    }
-
-                    if (!_pendingFolders.TryDequeue(out currentNode!))
-                    {
-                        SetRunState(RunState.Completed);
-                        _onScannerCompleted();
-                        _threadWaitForRunWaiter.SetWait();
-                        break;
-                    }
-
-                    if (currentNode.FolderName.Equals(@"C:\Windows", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        var files = Directory.GetFiles(currentNode.FolderName).Select(f => new FileInfo(f)).ToList();
-                        long fileBytes = files.Sum(f => f.Length);
-                        _scannerStats.TotalBytesFound += fileBytes;
-                        _scannerStats.TotalFilesFound += files.Count;
-                        UpdateTreeWithFolderFileBytes(currentNode, fileBytes);
-                    }
-                    catch (Exception e) when (e is UnauthorizedAccessException || e is IOException)
-                    {
-                        // Folder is not accesible
-                        currentNode.ScanError = e;
-                        Debug.WriteLine($"Cannot access files in folder {currentNode.FolderName}: {e.Message}");
-                        continue;
-                    }
-
-                    var options = new EnumerationOptions()
-                    {
-                        AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
-                    };
-
-                    List<string> childFolders = [];
-                    try
-                    {
-                        childFolders = Directory.GetDirectories(currentNode.FolderName, "*", options).ToList();
-                    }
-                    catch (Exception e)
-                    {
-                        // Unknown error enumerating directories, skip it.
-                        // It could have been deleted or similar.
-                        Debug.WriteLine($"Cannot get child directories for {currentNode.FolderName} : {e.Message}");
-                        currentNode.ScanError = e;
-                    }
-
-                    foreach (string folder in childFolders)
-                    {
-                        if (!string.IsNullOrWhiteSpace(folder))
-                        {
-                                var newNode = new ScanningNode { FolderName = folder };
-                                newNode.Parent = currentNode;
-                                currentNode.Children.Add(newNode);
-
-                                _pendingFolders.Enqueue(newNode);
-                                _scannerStats.TotalFoldersFound++;
-                        }
-                    }
-
-                    _onNodeUpdated(currentNode);
-
-                    if (_threadPauseWaiter.WouldWait())
-                    {
-                        SetRunState(RunState.Paused);
-                       _threadPauseWaiter.WaitIfSet();
-                    }
-                }
-            }
-
-            SetRunState(RunState.Aborted);
-        }
-
-        /// <summary>
-        /// Dispose waits for the worker thread to exit. Callbacks could happen before is has exited so
-        /// if this is called from UI thread and callbacks also requires UI thread a deadlock could occur.
-        /// </summary>
-        public void Dispose()
-        {
-            _disposeFlag.Set();
-            _threadPauseWaiter.SetNoWait();
-            _threadWaitForRunWaiter.SetNoWait();
+            SetRunState(RunState.Paused);
+            _threadPauseWaiter.WaitIfSet();
         }
     }
 }

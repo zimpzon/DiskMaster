@@ -7,9 +7,9 @@
     {
         private ManualResetEvent _event;
 
-        public ThreadWaiter(bool beginAslWillWait)
+        public ThreadWaiter(bool beginAsWillWait)
         {
-            _event = new(initialState: !beginAslWillWait);
+            _event = new(initialState: !beginAsWillWait);
         }
 
         public void SetWait()
