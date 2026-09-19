@@ -1,4 +1,6 @@
 using DiskMasterLib;
+using System.Diagnostics;
+using System.Xml.Linq;
 
 namespace MainForm
 {
@@ -11,7 +13,7 @@ namespace MainForm
         {
             InitializeComponent();
 
-            _folderExplorer = folderExplorerFactory.Create(OnScannerRunStateChanged, OnScannerNodeUpdated);
+            _folderExplorer = folderExplorerFactory.Create(OnScannerRunStateChanged, OnScannerNodeUpdated, OnScannerCompleted);
             UpdateActionButtonStates(_folderExplorer.RunState);
             UpdateScannerStateLabel(_folderExplorer.RunState);
         }
@@ -37,17 +39,30 @@ namespace MainForm
             LabScannerState.Text = $"Scanner state: {runState}";
         }
 
+
+        private void OnScannerCompleted()
+        {
+            UpdateScannerStats();
+        }
+
+        private void UpdateScannerStats()
+        {
+            Invoke(() => {
+                LabFoldersInQueue.Text = $"Folders in queue: {_folderExplorer.FoldersInQueue}";
+                LabCurrentFolder.Text = $"Current folder: -";
+                LabFoldersFound.Text = $"Folders found: {_folderExplorer.TotalFoldersFound}";
+                LabFilesFound.Text = $"Files found: {_folderExplorer.TotalFilesFound}";
+                LabSize.Text = $"Size: {FormatBytes(_folderExplorer.TotalBytesFound)}";
+            });
+        }
+
         int updateModulus;
         private void OnScannerNodeUpdated(IScanningNode node)
         {
-            if (updateModulus++ % 100 != 0)
+            if (updateModulus++ % 1000 != 0)
                 return;
 
-            Invoke(() => {
-                LabFoldersInQueue.Text = $"Folders in queue: {_folderExplorer.FoldersInQueue}";
-                LabCurrentFolder.Text = $"Current folder: {node.FolderName}";
-                LabFoldersProcessed.Text = $"Folders processed: {_folderExplorer.TotalFoldersFound}";
-            });
+            UpdateScannerStats();
         }
 
         private void UpdateActionButtonStates(RunState runState)
@@ -74,8 +89,25 @@ namespace MainForm
 
         private async void BtnRun_Click(object sender, EventArgs e)
         {
-            //_folderExplorer.Run(@"C:\mnt");
-            _folderExplorer.Run(@"C:\");
+            //_folderExplorer.Run(@"C:\Users\peter\source\repos\PythonChat\venv");
+            _folderExplorer.Run(@"C:\everquestlegends");
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            const double Kb = 1024;
+            const double Mb = Kb * 1024;
+            const double Gb = Mb * 1024;
+            const double Tb = Gb * 1024;
+
+            return bytes switch
+            {
+                < (long)Kb => $"{bytes} bytes",
+                < (long)Mb => $"{bytes / Kb:F2} KB",
+                < (long)Gb => $"{bytes / Mb:F2} MB",
+                < (long)Tb => $"{bytes / Gb:F2} GB",
+                _ => $"{bytes / Tb:F2} TB"
+            };
         }
 
         private void BtnPause_Click(object sender, EventArgs e)

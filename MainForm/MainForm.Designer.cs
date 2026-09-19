@@ -35,8 +35,10 @@
             LabScannerState = new Label();
             LabFoldersInQueue = new Label();
             LabCurrentFolder = new Label();
-            LabFoldersProcessed = new Label();
+            LabFoldersFound = new Label();
             RichTextLog = new RichTextBox();
+            LabFilesFound = new Label();
+            LabSize = new Label();
             SuspendLayout();
             // 
             // TvFolderView
@@ -103,30 +105,50 @@
             LabCurrentFolder.TabIndex = 6;
             LabCurrentFolder.Text = "Current folder: (none)";
             // 
-            // LabFoldersProcessed
+            // LabFoldersFound
             // 
-            LabFoldersProcessed.AutoSize = true;
-            LabFoldersProcessed.Location = new Point(476, 315);
-            LabFoldersProcessed.Name = "LabFoldersProcessed";
-            LabFoldersProcessed.Size = new Size(175, 25);
-            LabFoldersProcessed.TabIndex = 7;
-            LabFoldersProcessed.Text = "Folders processed: 0";
+            LabFoldersFound.AutoSize = true;
+            LabFoldersFound.Location = new Point(476, 315);
+            LabFoldersFound.Name = "LabFoldersFound";
+            LabFoldersFound.Size = new Size(142, 25);
+            LabFoldersFound.TabIndex = 7;
+            LabFoldersFound.Text = "Folders found: 0";
             // 
             // RichTextLog
             // 
-            RichTextLog.Location = new Point(947, 117);
+            RichTextLog.Location = new Point(965, 25);
             RichTextLog.Name = "RichTextLog";
-            RichTextLog.Size = new Size(370, 338);
+            RichTextLog.Size = new Size(109, 66);
             RichTextLog.TabIndex = 8;
             RichTextLog.Text = "";
+            // 
+            // LabFilesFound
+            // 
+            LabFilesFound.AutoSize = true;
+            LabFilesFound.Location = new Point(476, 280);
+            LabFilesFound.Name = "LabFilesFound";
+            LabFilesFound.Size = new Size(118, 25);
+            LabFilesFound.TabIndex = 9;
+            LabFilesFound.Text = "Files found: 0";
+            // 
+            // LabSize
+            // 
+            LabSize.AutoSize = true;
+            LabSize.Location = new Point(476, 242);
+            LabSize.Name = "LabSize";
+            LabSize.Size = new Size(73, 25);
+            LabSize.TabIndex = 10;
+            LabSize.Text = "Size: 0b";
             // 
             // MainForm
             // 
             AutoScaleDimensions = new SizeF(10F, 25F);
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(1468, 570);
+            Controls.Add(LabSize);
+            Controls.Add(LabFilesFound);
             Controls.Add(RichTextLog);
-            Controls.Add(LabFoldersProcessed);
+            Controls.Add(LabFoldersFound);
             Controls.Add(LabCurrentFolder);
             Controls.Add(LabFoldersInQueue);
             Controls.Add(LabScannerState);
@@ -150,7 +172,9 @@
         private Label LabScannerState;
         private Label LabFoldersInQueue;
         private Label LabCurrentFolder;
-        private Label LabFoldersProcessed;
+        private Label LabFoldersFound;
         private RichTextBox RichTextLog;
+        private Label LabFilesFound;
+        private Label LabSize;
     }
 }

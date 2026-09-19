@@ -9,12 +9,13 @@ namespace DiskMasterLib
 
         public long FoldersInQueue => _pendingFolders.Count;
         public long TotalFoldersFound => _scannerStats.TotalFoldersFound;
+        public long TotalFilesFound => _scannerStats.TotalFilesFound;
         public long TotalBytesFound => _scannerStats.TotalBytesFound;
 
         private ScannerStats _scannerStats = new();
 
         private int _runState = (int)RunState.Stopped;
-        private ConcurrentQueue<string> _pendingFolders = new();
+        private ConcurrentQueue<ScanningNode> _pendingFolders = new();
         private Thread _scanningThread;
         private ThreadWaiter _threadPauseWaiter = new(false);
         private ThreadWaiter _threadWaitForRunWaiter = new(false);
@@ -22,15 +23,18 @@ namespace DiskMasterLib
         private EventFlag _disposeFlag = new();
         private Action<RunState> _onRunStateChanged;
         private Action<IScanningNode> _onNodeUpdated;
+        private Action _onScannerCompleted;
         private ScanningNode _rootNode = ScanningNode.Empty;
 
-        public FolderExplorer(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated)
+        public FolderExplorer(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated, Action onScannerCompleted)
         {
             ArgumentNullException.ThrowIfNull(onRunStateChanged, nameof(onRunStateChanged));
             ArgumentNullException.ThrowIfNull(onNodeUpdated, nameof(onNodeUpdated));
+            ArgumentNullException.ThrowIfNull(onScannerCompleted, nameof(onScannerCompleted));
 
             _onRunStateChanged = onRunStateChanged;
             _onNodeUpdated = onNodeUpdated;
+            _onScannerCompleted = onScannerCompleted;
     
             _scanningThread = new Thread(ThreadMain)
             {
@@ -80,9 +84,9 @@ namespace DiskMasterLib
             }
 
             PrepareForNewRun();
-
+            _rootNode = new() { FolderName = rootFolder };
             SetRunState(RunState.Running);
-            _pendingFolders.Enqueue(rootFolder);
+            _pendingFolders.Enqueue(_rootNode);
             _threadWaitForRunWaiter.SetNoWait();
         }
 
@@ -114,12 +118,24 @@ namespace DiskMasterLib
             _stopFlag.Set();
         }
 
+        private void UpdateTreeWithFolderFileBytes(ScanningNode node, long fileBytes)
+        {
+            node.FileBytes += fileBytes;
+            var parentNode = node.Parent;
+            while (parentNode != ScanningNode.Empty)
+            {
+                parentNode.FileBytes += fileBytes;
+                parentNode = parentNode.Parent;
+            }
+        }
+
         private void ThreadMain()
         {
             // Scan from beginning loop
             while (!_disposeFlag.IsSet())
             {
                 _threadWaitForRunWaiter.WaitIfSet();
+                ScanningNode currentNode = ScanningNode.Empty;
 
                 // Folder scanning loop
                 while (true)
@@ -136,42 +152,55 @@ namespace DiskMasterLib
                         break;
                     }
 
-                    if (!_pendingFolders.TryDequeue(out string? currentFolder))
+                    if (!_pendingFolders.TryDequeue(out currentNode!))
                     {
                         SetRunState(RunState.Completed);
+                        _onScannerCompleted();
                         break;
                     }
 
-                    if (currentFolder.Equals(@"C:\Windows", StringComparison.OrdinalIgnoreCase))
+                    if (currentNode.FolderName.Equals(@"C:\Windows", StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
 
                     try
                     {
-                        var enumerationOptions = new EnumerationOptions {
-                            IgnoreInaccessible = true,
-                            ReturnSpecialDirectories = false,
-                        };
+                        var files = Directory.GetFiles(currentNode.FolderName).Select(f => new FileInfo(f)).ToList();
+                        long fileBytes = files.Sum(f => f.Length);
+                        _scannerStats.TotalBytesFound += fileBytes;
+                        _scannerStats.TotalFilesFound += files.Count;
+                        UpdateTreeWithFolderFileBytes(currentNode, fileBytes);
+                    }
+                    catch (Exception _) when (_ is UnauthorizedAccessException || _ is IOException)
+                    {
+                        // Folder is not accesible
+                        Debug.WriteLine($"CANNOT ACCESS FOLDER: {_.Message}");
+                        continue;
+                    }
 
-                        var childFolders = Directory.GetDirectories(currentFolder, "*", enumerationOptions);
-                        foreach (var folder in childFolders)
+                    var options = new EnumerationOptions()
+                    {
+                        AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
+                    };
+
+                    var childFolders = Directory.GetDirectories(currentNode.FolderName, "*", options).ToList();
+                    //childFolders = childFolders.Where(f => !f.EndsWith(@"\.") && !f.EndsWith(@"\..")).ToArray();
+
+                    foreach (string folder in childFolders)
+                    {
+                        if (!string.IsNullOrWhiteSpace(folder))
                         {
-                            if (!string.IsNullOrWhiteSpace(folder))
-                            {
-                                _pendingFolders.Enqueue(folder);
+                                var newNode = new ScanningNode { FolderName = folder };
+                                newNode.Parent = currentNode;
+                                currentNode.Children.Add(newNode);
+
+                                _pendingFolders.Enqueue(newNode);
                                 _scannerStats.TotalFoldersFound++;
-                            }
                         }
                     }
-                    catch(Exception _) when (_ is UnauthorizedAccessException || _ is IOException)
-                    {
-                        ;
-                        // Add node with flag
-                        Debug.WriteLine(_.Message);
-                    }
 
-                    _onNodeUpdated(new ScanningNode { FolderName = currentFolder });
+                    _onNodeUpdated(currentNode);
 
                     if (_threadPauseWaiter.WouldWait())
                     {

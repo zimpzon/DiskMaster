@@ -2,7 +2,7 @@
 {
     public class FolderExplorerFactory
     {
-        public FolderExplorer Create(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated)
-            => new FolderExplorer(onRunStateChanged, onNodeUpdated);
+        public FolderExplorer Create(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated, Action onScannerCompleted)
+            => new FolderExplorer(onRunStateChanged, onNodeUpdated, onScannerCompleted);
     }
 }
