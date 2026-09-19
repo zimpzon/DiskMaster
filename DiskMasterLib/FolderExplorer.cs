@@ -5,7 +5,7 @@ namespace DiskMasterLib
 {
     public class FolderExplorer : IDisposable
     {
-        public RunState RunState => (RunState)_runState;
+        public RunState RunState => (RunState)Volatile.Read(ref _runState);
 
         public long FoldersInQueue => _pendingFolders.Count;
         public long TotalFoldersFound => _scannerStats.TotalFoldersFound;
@@ -74,6 +74,9 @@ namespace DiskMasterLib
             var state = GetRunState();
             if (state == RunState.Running)
                 throw new InvalidOperationException($"Already running");
+
+            if (state == RunState.PausePending || state == RunState.StopPending)
+                throw new InvalidOperationException($"Cannot start Run in state {state}");
 
             bool isResume = state == RunState.Paused;
             if (isResume)
@@ -156,6 +159,7 @@ namespace DiskMasterLib
                     {
                         SetRunState(RunState.Completed);
                         _onScannerCompleted();
+                        _threadWaitForRunWaiter.SetWait();
                         break;
                     }
 
@@ -172,10 +176,11 @@ namespace DiskMasterLib
                         _scannerStats.TotalFilesFound += files.Count;
                         UpdateTreeWithFolderFileBytes(currentNode, fileBytes);
                     }
-                    catch (Exception _) when (_ is UnauthorizedAccessException || _ is IOException)
+                    catch (Exception e) when (e is UnauthorizedAccessException || e is IOException)
                     {
                         // Folder is not accesible
-                        Debug.WriteLine($"CANNOT ACCESS FOLDER: {_.Message}");
+                        currentNode.ScanError = e;
+                        Debug.WriteLine($"Cannot access files in folder {currentNode.FolderName}: {e.Message}");
                         continue;
                     }
 
@@ -184,8 +189,18 @@ namespace DiskMasterLib
                         AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
                     };
 
-                    var childFolders = Directory.GetDirectories(currentNode.FolderName, "*", options).ToList();
-                    //childFolders = childFolders.Where(f => !f.EndsWith(@"\.") && !f.EndsWith(@"\..")).ToArray();
+                    List<string> childFolders = [];
+                    try
+                    {
+                        childFolders = Directory.GetDirectories(currentNode.FolderName, "*", options).ToList();
+                    }
+                    catch (Exception e)
+                    {
+                        // Unknown error enumerating directories, skip it.
+                        // It could have been deleted or similar.
+                        Debug.WriteLine($"Cannot get child directories for {currentNode.FolderName} : {e.Message}");
+                        currentNode.ScanError = e;
+                    }
 
                     foreach (string folder in childFolders)
                     {
