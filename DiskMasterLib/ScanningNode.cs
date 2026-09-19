@@ -8,7 +8,12 @@
 
     internal class ScanningNode : IScanningNode
     {
-        public static readonly ScanningNode Empty = new() { Parent = Empty! };
+        public static readonly ScanningNode Empty = new();
+
+        static ScanningNode()
+        {
+            Empty.Parent = Empty;
+        }
 
         public ScanningNode Parent { get; set; } = ScanningNode.Empty;
         public List<ScanningNode> Children { get; set; } = [];
