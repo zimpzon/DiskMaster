@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="DiskMasterLib/DiskMasterLib.csproj" />
+  <Project Path="DiskMasterLib.Tests/DiskMasterLib.Tests.csproj" />
   <Project Path="MainForm/MainForm.csproj" />
 </Solution>
