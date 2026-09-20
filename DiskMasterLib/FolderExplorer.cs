@@ -72,7 +72,7 @@ namespace DiskMasterLib
             }
 
             PrepareForNewRun();
-            _rootNode = new() { FolderName = rootFolder };
+            _rootNode = new() { FolderName = rootFolder, InProgress = true };
             SetRunState(RunState.Running);
             _pendingFolders.Enqueue(_rootNode);
             _threadWaitForRunWaiter.SetNoWait();
@@ -177,12 +177,19 @@ namespace DiskMasterLib
                 }
 
                 if (currentNode.FolderName.Equals(ExcludedFolder, StringComparison.OrdinalIgnoreCase))
+                {
+                    MarkScanComplete(currentNode);
                     continue;
+                }
 
                 if (!TryScanFiles(currentNode))
+                {
+                    MarkScanComplete(currentNode);
                     continue;
+                }
 
                 EnqueueChildFolders(currentNode);
+                MarkScanComplete(currentNode);
 
                 _onNodeUpdated(currentNode);
 
@@ -237,7 +244,7 @@ namespace DiskMasterLib
                 if (string.IsNullOrWhiteSpace(folder))
                     continue;
 
-                var childNode = new ScanningNode { FolderName = folder, Parent = node };
+                var childNode = new ScanningNode { FolderName = folder, Parent = node, InProgress = true };
                 node.Children.Add(childNode);
 
                 _pendingFolders.Enqueue(childNode);
@@ -253,6 +260,28 @@ namespace DiskMasterLib
             {
                 parentNode.FileBytes += fileBytes;
                 parentNode = parentNode.Parent;
+            }
+        }
+
+        /// <summary>
+        /// Clears InProgress on a node once none of its children are still in progress, then does the
+        /// same check on its parent, and so on up the tree. A child's InProgress already reflects whether
+        /// everything beneath it is done, so checking only direct children at each level is enough.
+        /// </summary>
+        private static void MarkScanComplete(ScanningNode node)
+        {
+            var current = node;
+            while (true)
+            {
+                if (current.Children.Any(c => c.InProgress))
+                    return;
+
+                current.InProgress = false;
+
+                if (current.Parent == ScanningNode.Empty)
+                    return;
+
+                current = current.Parent;
             }
         }
 

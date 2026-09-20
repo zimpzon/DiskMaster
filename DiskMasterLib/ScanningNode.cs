@@ -4,6 +4,7 @@
     {
         string FolderName { get; }
         long FileBytes { get; }
+        bool InProgress { get; }
     }
 
     internal class ScanningNode : IScanningNode
@@ -20,5 +21,6 @@
         public string FolderName { get; set; } = string.Empty;
         public long FileBytes { get; set; }
         public Exception? ScanError { get; set; }
+        public bool InProgress { get; set; }
     }
 }
