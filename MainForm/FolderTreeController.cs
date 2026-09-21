@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DiskMasterLib;
 
 namespace MainForm
@@ -20,6 +21,16 @@ namespace MainForm
         private static readonly Color ScanningColor = Color.DarkOrange;
         private static readonly Color SizeColor = Color.DarkGreen;
         private static readonly Color CountsColor = Color.SteelBlue;
+
+        // Control.DoubleBuffered (the usual WinForms flicker fix) does nothing for TreeView: it
+        // only affects WinForms' own OnPaint pipeline, and TreeView delegates its actual rendering
+        // to the native Win32 control underneath. The real fix is telling that native control to
+        // double-buffer itself, via SendMessage(TVM_SETEXTENDEDSTYLE, TVS_EX_DOUBLEBUFFER).
+        private const int TVM_SETEXTENDEDSTYLE = 0x1100 + 44;
+        private const int TVS_EX_DOUBLEBUFFER = 0x0004;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         private enum NodeState { Pending, Scanning, Completed }
 
@@ -49,10 +60,25 @@ namespace MainForm
             _treeView.DrawNode += OnDrawNode;
             _treeView.BeforeExpand += OnBeforeExpand;
             _treeView.AfterCollapse += OnAfterCollapse;
+            EnableNativeDoubleBuffering();
 
             _timer = new System.Windows.Forms.Timer { Interval = 300 };
             _timer.Tick += OnTimerTick;
             _timer.Start();
+        }
+
+        private void EnableNativeDoubleBuffering()
+        {
+            if (!_treeView.IsHandleCreated)
+            {
+                // FolderTreeController is constructed before the form is shown, so the native
+                // control usually doesn't have a Win32 handle yet - defer until it does rather
+                // than forcing early handle creation.
+                _treeView.HandleCreated += (_, _) => EnableNativeDoubleBuffering();
+                return;
+            }
+
+            SendMessage(_treeView.Handle, TVM_SETEXTENDEDSTYLE, (IntPtr)TVS_EX_DOUBLEBUFFER, (IntPtr)TVS_EX_DOUBLEBUFFER);
         }
 
         private void OnTimerTick(object? sender, EventArgs e)
@@ -170,11 +196,18 @@ namespace MainForm
             var bounds = e.Bounds;
             var x = bounds.Left;
 
+            // The control already painted the background before this runs, selection highlight
+            // included - our per-segment colors (greens/blues/oranges tuned for a white background)
+            // can be unreadable against that highlight (SteelBlue on the system blue highlight is
+            // nearly invisible), so match what every native control does: selected text always
+            // uses HighlightText, ignoring the segment's own color.
+            bool isSelected = (e.State & TreeNodeStates.Selected) != 0;
+
             foreach (var (text, color) in display.Segments)
             {
                 var width = TextRenderer.MeasureText(e.Graphics, text, font, bounds.Size, flags).Width;
                 var rect = new Rectangle(x, bounds.Top, width, bounds.Height);
-                TextRenderer.DrawText(e.Graphics, text, font, rect, color, flags);
+                TextRenderer.DrawText(e.Graphics, text, font, rect, isSelected ? SystemColors.HighlightText : color, flags);
                 x += width;
             }
         }
