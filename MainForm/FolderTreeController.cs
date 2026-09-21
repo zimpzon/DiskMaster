@@ -22,6 +22,20 @@ namespace MainForm
         private static readonly Color SizeColor = Color.DarkGreen;
         private static readonly Color CountsColor = Color.SteelBlue;
 
+        // Hot-path highlighting: how big a slice of the *whole disk* a node's bytes represent -
+        // not the scan total, so it stays meaningful even when scanning a subfolder - shown only
+        // once it crosses WarmFraction, colored deeper red past HotFraction. Deliberately a red
+        // family, distinct from every other color already in use here, so it never reads as a
+        // scan-state indicator. Since FileBytes already rolls up cumulatively to every ancestor,
+        // this needs no extra bookkeeping: a hot folder buried three levels down naturally makes
+        // its parent, grandparent, etc. show an elevated percentage too, guiding a look downward
+        // without needing to single out "the one biggest path" - however many hot spots exist,
+        // wherever they are, they light up as soon as their branch is expanded.
+        private static readonly Color WarmColor = Color.IndianRed;
+        private static readonly Color HotColor = Color.Firebrick;
+        private const double WarmFraction = 0.01;
+        private const double HotFraction = 0.05;
+
         // Control.DoubleBuffered (the usual WinForms flicker fix) does nothing for TreeView: it
         // only affects WinForms' own OnPaint pipeline, and TreeView delegates its actual rendering
         // to the native Win32 control underneath. The real fix is telling that native control to
@@ -49,6 +63,7 @@ namespace MainForm
         private readonly System.Windows.Forms.Timer _timer;
 
         private IScanningNode? _lastSeenRoot;
+        private long _diskSizeBytes;
         private bool _disposed;
 
         public FolderTreeController(TreeView treeView, FolderExplorer explorer)
@@ -109,9 +124,31 @@ namespace MainForm
         {
             _treeView.Nodes.Clear();
             if (root is null)
+            {
+                _diskSizeBytes = 0;
                 return;
+            }
 
+            _diskSizeBytes = GetDiskSizeBytes(root.FolderName);
             _treeView.Nodes.Add(CreateTreeNode(root));
+        }
+
+        /// <summary>
+        /// 0 (rather than throwing) for anything DriveInfo can't make sense of, e.g. a UNC network
+        /// path - hot-path percentages just won't be shown for that scan, which is the right call
+        /// anyway since "disk size" isn't a well-defined idea for a network share.
+        /// </summary>
+        private static long GetDiskSizeBytes(string path)
+        {
+            try
+            {
+                var pathRoot = Path.GetPathRoot(path);
+                return string.IsNullOrEmpty(pathRoot) ? 0 : new DriveInfo(pathRoot).TotalSize;
+            }
+            catch (Exception e) when (e is IOException || e is ArgumentException || e is UnauthorizedAccessException)
+            {
+                return 0;
+            }
         }
 
         private void RefreshVisibleNodes(TreeNodeCollection nodes)
@@ -260,13 +297,36 @@ namespace MainForm
             {
                 (name, _treeView.ForeColor),
                 ($" \u2014 {size}", sizeColor),
-                ($"  ({counts})", CountsColor),
             };
+
+            if (TryBuildHotPathSegment(node.FileBytes, out var hotPathSegment))
+                segments.Add(hotPathSegment);
+
+            segments.Add(($"  ({counts})", CountsColor));
 
             if (state == NodeState.Scanning)
                 segments.Add((" (Scanning...)", ScanningColor));
 
             return new NodeDisplay(segments);
+        }
+
+        private bool TryBuildHotPathSegment(long fileBytes, out (string Text, Color Color) segment)
+        {
+            segment = default;
+            if (_diskSizeBytes <= 0)
+                return false;
+
+            // Round to the displayed precision *before* comparing against the thresholds, not
+            // after - otherwise two values that round to the same displayed "5.0%" could land on
+            // opposite sides of the Warm/Hot cutoff and show different colors for identical text
+            // (the same rounding-vs-threshold mismatch fixed earlier in FormatBytes/FormatCount).
+            var percent = Math.Round((double)fileBytes / _diskSizeBytes * 100, 1);
+            if (percent < WarmFraction * 100)
+                return false;
+
+            var color = percent >= HotFraction * 100 ? HotColor : WarmColor;
+            segment = ($" ({percent:F1}% of disk)", color);
+            return true;
         }
 
         private NodeState GetNodeState(IScanningNode node)
