@@ -5,6 +5,7 @@ namespace MainForm
     public partial class MainForm : Form
     {
         private readonly FolderExplorer _folderExplorer;
+        private readonly FolderTreeController _folderTreeController;
         private bool _scannerAborted;
         private int _updateModulus;
 
@@ -13,15 +14,52 @@ namespace MainForm
             InitializeComponent();
 
             _folderExplorer = folderExplorerFactory.Create(OnScannerRunStateChanged, OnScannerNodeUpdated, OnScannerCompleted);
+            _folderTreeController = new FolderTreeController(TvFolderView, _folderExplorer);
+            PopulateRootFolderChoices();
             UpdateActionButtonStates(_folderExplorer.RunState);
             UpdateScannerStateLabel(_folderExplorer.RunState);
         }
 
         // ---- Button handlers ----
 
+        private void PopulateRootFolderChoices()
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (drive.IsReady)
+                    CmbRootFolder.Items.Add(drive.RootDirectory.FullName);
+            }
+
+            var systemDrive = Path.GetPathRoot(Environment.SystemDirectory);
+            CmbRootFolder.Text = systemDrive is not null && CmbRootFolder.Items.Contains(systemDrive)
+                ? systemDrive
+                : CmbRootFolder.Items.Cast<string>().FirstOrDefault() ?? "";
+        }
+
+        private void BtnBrowse_Click(object sender, EventArgs e)
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Select a folder to scan",
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton = false,
+                SelectedPath = Directory.Exists(CmbRootFolder.Text) ? CmbRootFolder.Text : "",
+            };
+
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+                CmbRootFolder.Text = dialog.SelectedPath;
+        }
+
         private void BtnRun_Click(object sender, EventArgs e)
         {
-            _folderExplorer.Run(@"C:\everquestlegends");
+            var path = CmbRootFolder.Text.Trim();
+            if (!Directory.Exists(path))
+            {
+                MessageBox.Show(this, $"\"{path}\" is not a valid, accessible folder.", "DiskMaster", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            _folderExplorer.Run(path);
         }
 
         private void BtnPause_Click(object sender, EventArgs e)
@@ -39,6 +77,7 @@ namespace MainForm
             if (_scannerAborted)
                 return;
 
+            _folderTreeController.Dispose();
             _folderExplorer.Dispose();
             e.Cancel = true;
         }
@@ -79,17 +118,17 @@ namespace MainForm
 
         private void UpdateScannerStateLabel(RunState runState)
         {
-            LabScannerState.Text = $"Scanner state: {runState}";
+            SslScannerState.Text = $"Scanner state: {runState}";
         }
 
         private void UpdateScannerStats()
         {
             Invoke(() => {
-                LabFoldersInQueue.Text = $"Folders in queue: {_folderExplorer.FoldersInQueue}";
-                LabCurrentFolder.Text = $"Current folder: -";
-                LabFoldersFound.Text = $"Folders found: {_folderExplorer.TotalFoldersFound}";
-                LabFilesFound.Text = $"Files found: {_folderExplorer.TotalFilesFound}";
-                LabSize.Text = $"Size: {FormatBytes(_folderExplorer.TotalBytesFound)}";
+                SslFoldersInQueue.Text = $"Folders in queue: {_folderExplorer.FoldersInQueue}";
+                SslCurrentFolder.Text = $"Current folder: {TruncatePathForStatusBar(_folderExplorer.CurrentlyScanningNode?.FolderName ?? "-")}";
+                SslFoldersFound.Text = $"Folders found: {_folderExplorer.TotalFoldersFound}";
+                SslFilesFound.Text = $"Files found: {_folderExplorer.TotalFilesFound}";
+                SslSize.Text = $"Size: {FormatBytes(_folderExplorer.TotalBytesFound)}";
             });
         }
 
@@ -100,6 +139,8 @@ namespace MainForm
                 BtnRun.Enabled = false;
                 BtnPause.Enabled = false;
                 BtnStop.Enabled = false;
+                CmbRootFolder.Enabled = false;
+                BtnBrowse.Enabled = false;
                 return;
             }
 
@@ -113,9 +154,30 @@ namespace MainForm
 
             BtnStop.Enabled = runState == RunState.Running ||
                 runState == RunState.Paused;
+
+            // Excludes Paused: clicking Run while paused resumes the existing scan and ignores
+            // the folder selection entirely, so changing it then would be misleading.
+            CmbRootFolder.Enabled =
+                runState == RunState.WaitingForRun ||
+                runState == RunState.Stopped ||
+                runState == RunState.Completed;
+            BtnBrowse.Enabled = CmbRootFolder.Enabled;
         }
 
-        private static string FormatBytes(long bytes)
+        /// <summary>
+        /// StatusStrip doesn't wrap or shrink items to fit - an item whose natural width exceeds
+        /// the space available just renders past the strip's edge instead of truncating, so a deep
+        /// path would otherwise push itself (and push nothing else, but render itself invisibly)
+        /// off-screen. Keeping the tail of the path (the most specific, most useful part) rather
+        /// than the start.
+        /// </summary>
+        private static string TruncatePathForStatusBar(string path)
+        {
+            const int MaxLength = 60;
+            return path.Length <= MaxLength ? path : "..." + path[^(MaxLength - 3)..];
+        }
+
+        internal static string FormatBytes(long bytes)
         {
             const double Kb = 1024;
             const double Mb = Kb * 1024;

@@ -15,9 +15,35 @@ namespace DiskMasterLib
         public long TotalFilesFound => _scannerStats.TotalFilesFound;
         public long TotalBytesFound => _scannerStats.TotalBytesFound;
 
+        /// <summary>
+        /// How many folders were left out of the totals above - either hardcoded-excluded
+        /// (ExcludedFolder) or inaccessible (UnauthorizedAccessException/IOException while
+        /// reading its files or listing its subfolders). The totals are never wrong so much as
+        /// incomplete when this is non-zero.
+        /// </summary>
+        public long SkippedFolderCount => _scannerStats.SkippedFolderCount;
+
+        /// <summary>
+        /// The root of the current (or most recent) scan, or null before Run() has ever been called.
+        /// _rootNode is only ever touched from the caller's thread (assigned in Run()), so this needs
+        /// no extra synchronization beyond that same-thread assumption.
+        /// </summary>
+        public IScanningNode? RootNode => ReferenceEquals(_rootNode, ScanningNode.Empty) ? null : _rootNode;
+
+        /// <summary>
+        /// The one node the scanning thread is actively working on right now, or null when nothing
+        /// is running. Every other node with InProgress == true is merely waiting - either still
+        /// queued, or an ancestor waiting on descendants. Reference assignment is atomic and this is
+        /// only ever written by the scanning thread, so Volatile is enough - no lock needed.
+        /// </summary>
+        public IScanningNode? CurrentlyScanningNode => Volatile.Read(ref _currentlyScanningNode);
+
         // ---- Fields ----
 
-        private readonly ConcurrentQueue<ScanningNode> _pendingFolders = new();
+        // A stack, not a queue: scanning goes depth-first (fully finish one branch before
+        // starting the next sibling) rather than breadth-first, so a live view doesn't jump
+        // between unrelated branches while working through a level.
+        private readonly ConcurrentStack<ScanningNode> _pendingFolders = new();
         private readonly Thread _scanningThread;
         private readonly ThreadWaiter _threadPauseWaiter = new(false);
         private readonly ThreadWaiter _threadWaitForRunWaiter = new(false);
@@ -30,6 +56,7 @@ namespace DiskMasterLib
         private ScannerStats _scannerStats = new();
         private int _runState = (int)RunState.Stopped;
         private ScanningNode _rootNode = ScanningNode.Empty;
+        private ScanningNode? _currentlyScanningNode;
 
         public FolderExplorer(Action<RunState> onRunStateChanged, Action<IScanningNode> onNodeUpdated, Action onScannerCompleted)
         {
@@ -74,7 +101,7 @@ namespace DiskMasterLib
             PrepareForNewRun();
             _rootNode = new() { FolderName = rootFolder, InProgress = true };
             SetRunState(RunState.Running);
-            _pendingFolders.Enqueue(_rootNode);
+            _pendingFolders.Push(_rootNode);
             _threadWaitForRunWaiter.SetNoWait();
         }
 
@@ -136,6 +163,7 @@ namespace DiskMasterLib
             _stopFlag.Clear();
             _pendingFolders.Clear();
             _scannerStats = new();
+            Volatile.Write(ref _currentlyScanningNode, null);
         }
 
         private void ThrowIfDisposed()
@@ -168,7 +196,7 @@ namespace DiskMasterLib
                     return;
                 }
 
-                if (!_pendingFolders.TryDequeue(out var currentNode))
+                if (!_pendingFolders.TryPop(out var currentNode))
                 {
                     SetRunState(RunState.Completed);
                     _onScannerCompleted();
@@ -176,8 +204,11 @@ namespace DiskMasterLib
                     return;
                 }
 
+                Volatile.Write(ref _currentlyScanningNode, currentNode);
+
                 if (currentNode.FolderName.Equals(ExcludedFolder, StringComparison.OrdinalIgnoreCase))
                 {
+                    _scannerStats.SkippedFolderCount++;
                     MarkScanComplete(currentNode);
                     continue;
                 }
@@ -206,13 +237,14 @@ namespace DiskMasterLib
 
                 _scannerStats.TotalBytesFound += fileBytes;
                 _scannerStats.TotalFilesFound += files.Count;
-                AddFileBytesToTree(node, fileBytes);
+                AddFileStatsToTree(node, fileBytes, files.Count);
                 return true;
             }
             catch (Exception e) when (e is UnauthorizedAccessException || e is IOException)
             {
                 // Folder is not accesible
                 node.ScanError = e;
+                _scannerStats.SkippedFolderCount++;
                 Debug.WriteLine($"Cannot access files in folder {node.FolderName}: {e.Message}");
                 return false;
             }
@@ -236,30 +268,62 @@ namespace DiskMasterLib
                 // It could have been deleted or similar.
                 Debug.WriteLine($"Cannot get child directories for {node.FolderName} : {e.Message}");
                 node.ScanError = e;
+                _scannerStats.SkippedFolderCount++;
                 return;
             }
 
+            var childNodes = new List<ScanningNode>();
             foreach (string folder in childFolders)
             {
                 if (string.IsNullOrWhiteSpace(folder))
                     continue;
 
                 var childNode = new ScanningNode { FolderName = folder, Parent = node, InProgress = true };
-                node.Children.Add(childNode);
+                node.AddChild(childNode);
+                childNodes.Add(childNode);
 
-                _pendingFolders.Enqueue(childNode);
                 _scannerStats.TotalFoldersFound++;
             }
+
+            if (childNodes.Count > 0)
+                AddFolderCountToTree(node, childNodes.Count);
+
+            // Push in reverse so the first-discovered child (also the first shown in the tree)
+            // ends up on top of the stack and is scanned first - without this, the stack's LIFO
+            // order would dive into the last child first instead.
+            for (int i = childNodes.Count - 1; i >= 0; i--)
+                _pendingFolders.Push(childNodes[i]);
         }
 
-        private static void AddFileBytesToTree(ScanningNode node, long fileBytes)
+        private static void AddFileStatsToTree(ScanningNode node, long fileBytes, long fileCount)
         {
             node.FileBytes += fileBytes;
+            node.FileCount += fileCount;
             var parentNode = node.Parent;
             while (parentNode != ScanningNode.Empty)
             {
                 parentNode.FileBytes += fileBytes;
+                parentNode.FileCount += fileCount;
                 parentNode = parentNode.Parent;
+            }
+        }
+
+        /// <summary>
+        /// Adds newly-discovered subfolders to node's count and every ancestor's - node itself is
+        /// included since they're direct children of it, but the walk stops before Empty so the
+        /// sentinel itself is never touched.
+        /// </summary>
+        private static void AddFolderCountToTree(ScanningNode node, long folderCount)
+        {
+            var current = node;
+            while (true)
+            {
+                current.FolderCount += folderCount;
+
+                if (current.Parent == ScanningNode.Empty)
+                    return;
+
+                current = current.Parent;
             }
         }
 
