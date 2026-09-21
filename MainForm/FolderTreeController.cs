@@ -11,7 +11,7 @@ namespace MainForm
     /// off a UI-thread-only Timer instead, avoiding any cross-thread Invoke marshaling. That's cheap
     /// because the number of visible nodes is exactly what virtualization keeps small.
     ///
-    /// Each node's label is drawn in two colored segments (folder name, then status/size) using an
+    /// Each node's label is drawn in several colored segments (name, size, counts, status) using an
     /// owner-drawn TreeView, since a plain TreeNode can only have one color for its whole text.
     /// </summary>
     internal sealed class FolderTreeController : IDisposable
@@ -19,12 +19,18 @@ namespace MainForm
         private static readonly Color PendingColor = Color.Gray;
         private static readonly Color ScanningColor = Color.DarkOrange;
         private static readonly Color SizeColor = Color.DarkGreen;
+        private static readonly Color CountsColor = Color.SteelBlue;
 
         private enum NodeState { Pending, Scanning, Completed }
 
-        private readonly record struct NodeDisplay(string NamePart, string StatusPart, Color NameColor, Color StatusColor)
+        /// <summary>
+        /// A label as a sequence of (text, color) runs drawn left to right - lets a node's name,
+        /// size, counts and status each carry their own color instead of just one color for the
+        /// whole line.
+        /// </summary>
+        private readonly record struct NodeDisplay(IReadOnlyList<(string Text, Color Color)> Segments)
         {
-            public string FullText => NamePart + StatusPart;
+            public string FullText => string.Concat(Segments.Select(s => s.Text));
         }
 
         private readonly TreeView _treeView;
@@ -51,14 +57,26 @@ namespace MainForm
 
         private void OnTimerTick(object? sender, EventArgs e)
         {
-            var root = _explorer.RootNode;
-            if (!ReferenceEquals(root, _lastSeenRoot))
+            // Batch this tick's changes: without BeginUpdate/EndUpdate, every individual Text
+            // change or node Add/Clear repaints immediately, which is what was causing the
+            // flicker - several visible nodes (the whole active-scan branch) can change on the
+            // same tick, so those repaints were visibly stacking up rather than landing as one.
+            _treeView.BeginUpdate();
+            try
             {
-                _lastSeenRoot = root;
-                SeedTree(root);
-            }
+                var root = _explorer.RootNode;
+                if (!ReferenceEquals(root, _lastSeenRoot))
+                {
+                    _lastSeenRoot = root;
+                    SeedTree(root);
+                }
 
-            RefreshVisibleNodes(_treeView.Nodes);
+                RefreshVisibleNodes(_treeView.Nodes);
+            }
+            finally
+            {
+                _treeView.EndUpdate();
+            }
         }
 
         private void SeedTree(IScanningNode? root)
@@ -105,8 +123,18 @@ namespace MainForm
             if (treeNode.Tag is not IScanningNode node)
                 return;
 
-            if (treeNode.Nodes.Count == 1 && treeNode.Nodes[0].Tag == null)
+            if (treeNode.Nodes.Count != 1 || treeNode.Nodes[0].Tag != null)
+                return;
+
+            _treeView.BeginUpdate();
+            try
+            {
                 PopulateChildren(treeNode, node);
+            }
+            finally
+            {
+                _treeView.EndUpdate();
+            }
         }
 
         private void OnAfterCollapse(object? sender, TreeViewEventArgs e)
@@ -115,9 +143,17 @@ namespace MainForm
             if (treeNode.Tag is not IScanningNode node)
                 return;
 
-            treeNode.Nodes.Clear();
-            if (node.Children.Count > 0)
-                treeNode.Nodes.Add(CreateDummyNode());
+            _treeView.BeginUpdate();
+            try
+            {
+                treeNode.Nodes.Clear();
+                if (node.Children.Count > 0)
+                    treeNode.Nodes.Add(CreateDummyNode());
+            }
+            finally
+            {
+                _treeView.EndUpdate();
+            }
         }
 
         private void OnDrawNode(object? sender, DrawTreeNodeEventArgs e)
@@ -132,13 +168,15 @@ namespace MainForm
             var font = e.Node.NodeFont ?? _treeView.Font;
             const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.VerticalCenter;
             var bounds = e.Bounds;
+            var x = bounds.Left;
 
-            var nameWidth = TextRenderer.MeasureText(e.Graphics, display.NamePart, font, bounds.Size, flags).Width;
-            var nameRect = new Rectangle(bounds.Left, bounds.Top, nameWidth, bounds.Height);
-            TextRenderer.DrawText(e.Graphics, display.NamePart, font, nameRect, display.NameColor, flags);
-
-            var statusRect = new Rectangle(bounds.Left + nameWidth, bounds.Top, Math.Max(bounds.Width - nameWidth, 0), bounds.Height);
-            TextRenderer.DrawText(e.Graphics, display.StatusPart, font, statusRect, display.StatusColor, flags);
+            foreach (var (text, color) in display.Segments)
+            {
+                var width = TextRenderer.MeasureText(e.Graphics, text, font, bounds.Size, flags).Width;
+                var rect = new Rectangle(x, bounds.Top, width, bounds.Height);
+                TextRenderer.DrawText(e.Graphics, text, font, rect, color, flags);
+                x += width;
+            }
         }
 
         private void PopulateChildren(TreeNode treeNode, IScanningNode node)
@@ -159,20 +197,43 @@ namespace MainForm
 
         private static TreeNode CreateDummyNode() => new();
 
+        /// <summary>
+        /// Size and counts are different kinds of measurement (bytes vs. item counts), so they get
+        /// their own colors and are visually grouped separately (size, then counts in parens) rather
+        /// than run together - that grouping, not just color, is what actually makes them easy to
+        /// tell apart at a glance.
+        /// </summary>
         private NodeDisplay BuildNodeDisplay(IScanningNode node)
         {
             var name = Path.GetFileName(node.FolderName);
             if (string.IsNullOrEmpty(name))
                 name = node.FolderName; // e.g. a drive root like "C:\"
 
-            var counts = $"{node.FolderCount} folders, {node.FileCount} files";
+            var state = GetNodeState(node);
 
-            return GetNodeState(node) switch
+            if (state == NodeState.Pending)
             {
-                NodeState.Pending => new NodeDisplay(name, " (Pending...)", _treeView.ForeColor, PendingColor),
-                NodeState.Scanning => new NodeDisplay(name, $" \u2014 {MainForm.FormatBytes(node.FileBytes)} \u00b7 {counts} (Scanning...)", _treeView.ForeColor, ScanningColor),
-                _ => new NodeDisplay(name, $" \u2014 {MainForm.FormatBytes(node.FileBytes)} \u00b7 {counts}", _treeView.ForeColor, SizeColor),
+                return new NodeDisplay([
+                    (name, _treeView.ForeColor),
+                    (" (Pending...)", PendingColor),
+                ]);
+            }
+
+            var sizeColor = state == NodeState.Scanning ? ScanningColor : SizeColor;
+            var size = MainForm.FormatBytes(node.FileBytes);
+            var counts = $"{MainForm.FormatCount(node.FolderCount)} folders, {MainForm.FormatCount(node.FileCount)} files";
+
+            var segments = new List<(string, Color)>
+            {
+                (name, _treeView.ForeColor),
+                ($" \u2014 {size}", sizeColor),
+                ($"  ({counts})", CountsColor),
             };
+
+            if (state == NodeState.Scanning)
+                segments.Add((" (Scanning...)", ScanningColor));
+
+            return new NodeDisplay(segments);
         }
 
         private NodeState GetNodeState(IScanningNode node)

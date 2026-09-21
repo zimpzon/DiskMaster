@@ -124,10 +124,10 @@ namespace MainForm
         private void UpdateScannerStats()
         {
             Invoke(() => {
-                SslFoldersInQueue.Text = $"Folders in queue: {_folderExplorer.FoldersInQueue}";
+                SslFoldersInQueue.Text = $"Folders in queue: {FormatCount(_folderExplorer.FoldersInQueue)}";
                 SslCurrentFolder.Text = $"Current folder: {TruncatePathForStatusBar(_folderExplorer.CurrentlyScanningNode?.FolderName ?? "-")}";
-                SslFoldersFound.Text = $"Folders found: {_folderExplorer.TotalFoldersFound}";
-                SslFilesFound.Text = $"Files found: {_folderExplorer.TotalFilesFound}";
+                SslFoldersFound.Text = $"Folders found: {FormatCount(_folderExplorer.TotalFoldersFound)}";
+                SslFilesFound.Text = $"Files found: {FormatCount(_folderExplorer.TotalFilesFound)}";
                 SslSize.Text = $"Size: {FormatBytes(_folderExplorer.TotalBytesFound)}";
             });
         }
@@ -184,13 +184,38 @@ namespace MainForm
             const double Gb = Mb * 1024;
             const double Tb = Gb * 1024;
 
+            // The Math.Round guards (rather than plain "< Mb" etc.) matter: e.g. 1048575 bytes is
+            // technically < Mb, but 1048575/Kb rounds to 1024.00 at 2 decimals, which would
+            // otherwise display as the nonsensical "1024.00 KB" instead of rolling over to "1.00 MB".
             return bytes switch
             {
-                < (long)Kb => $"{bytes} bytes",
-                < (long)Mb => $"{bytes / Kb:F2} KB",
-                < (long)Gb => $"{bytes / Mb:F2} MB",
-                < (long)Tb => $"{bytes / Gb:F2} GB",
+                _ when bytes < (long)Kb => $"{bytes} bytes",
+                _ when Math.Round(bytes / Kb, 2) < 1024 => $"{bytes / Kb:F2} KB",
+                _ when Math.Round(bytes / Mb, 2) < 1024 => $"{bytes / Mb:F2} MB",
+                _ when Math.Round(bytes / Gb, 2) < 1024 => $"{bytes / Gb:F2} GB",
                 _ => $"{bytes / Tb:F2} TB"
+            };
+        }
+
+        /// <summary>
+        /// Same idea as FormatBytes - a bare count is hard to read once a scan reaches into the
+        /// hundreds of thousands, so scale it the same way, just with decimal (1000-based) steps
+        /// instead of binary ones, since these are counts, not byte multiples.
+        /// </summary>
+        internal static string FormatCount(long count)
+        {
+            const double K = 1000;
+            const double M = K * 1000;
+            const double B = M * 1000;
+
+            // See the Math.Round guards in FormatBytes - same rollover-at-the-boundary fix applies
+            // here, e.g. 999999 is < M but rounds to "1000.00 K" at 2 decimals without this.
+            return count switch
+            {
+                _ when count < (long)K => $"{count}",
+                _ when Math.Round(count / K, 2) < 1000 => $"{count / K:F2} K",
+                _ when Math.Round(count / M, 2) < 1000 => $"{count / M:F2} M",
+                _ => $"{count / B:F2} B"
             };
         }
     }
