@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using DiskMasterLib;
 
 namespace MainForm
@@ -17,22 +17,14 @@ namespace MainForm
     /// </summary>
     internal sealed class FolderTreeController : IDisposable
     {
-        private static readonly Color PendingColor = Color.Gray;
-        private static readonly Color ScanningColor = Color.DarkOrange;
-        private static readonly Color SizeColor = Color.DarkGreen;
-        private static readonly Color CountsColor = Color.SteelBlue;
-
-        // Hot-path highlighting: how big a slice of the *whole disk* a node's bytes represent -
-        // not the scan total, so it stays meaningful even when scanning a subfolder - shown only
-        // once it crosses WarmFraction, colored deeper red past HotFraction. Deliberately a red
-        // family, distinct from every other color already in use here, so it never reads as a
-        // scan-state indicator. Since FileBytes already rolls up cumulatively to every ancestor,
-        // this needs no extra bookkeeping: a hot folder buried three levels down naturally makes
-        // its parent, grandparent, etc. show an elevated percentage too, guiding a look downward
-        // without needing to single out "the one biggest path" - however many hot spots exist,
-        // wherever they are, they light up as soon as their branch is expanded.
-        private static readonly Color WarmColor = Color.IndianRed;
-        private static readonly Color HotColor = Color.Firebrick;
+        // Hot-path highlighting thresholds: how big a slice of the *whole disk* a node's bytes
+        // represent - not the scan total, so it stays meaningful even when scanning a subfolder -
+        // shown only once it crosses WarmFraction, colored deeper past HotFraction. Since FileBytes
+        // already rolls up cumulatively to every ancestor, this needs no extra bookkeeping: a hot
+        // folder buried three levels down naturally makes its parent, grandparent, etc. show an
+        // elevated percentage too, guiding a look downward without needing to single out "the one
+        // biggest path" - however many hot spots exist, wherever they are, they light up as soon as
+        // their branch is expanded.
         private const double WarmFraction = 0.01;
         private const double HotFraction = 0.05;
 
@@ -45,6 +37,14 @@ namespace MainForm
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        // Setting BackColor/ForeColor covers the text area, but a plain TreeView's scrollbar and
+        // expand glyphs stay native-light-themed regardless - SetWindowTheme(..., "DarkMode_Explorer")
+        // is the standard, documented way to make Explorer-style common controls (TreeView, ListView)
+        // render those chrome bits in Windows' own dark style too. "Explorer" (or a null subApp)
+        // reverts to normal light chrome.
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetWindowTheme(IntPtr hWnd, string? pszSubAppName, string? pszSubIdList);
 
         private enum NodeState { Pending, Scanning, Completed }
 
@@ -66,6 +66,11 @@ namespace MainForm
         private long _diskSizeBytes;
         private bool _disposed;
 
+        // The state colors, swappable via SetTheme. The "name" segment doesn't need an entry here
+        // since it's always drawn in _treeView.ForeColor directly, which MainForm already updates
+        // as part of applying a theme.
+        private AppTheme _theme = AppTheme.Light;
+
         public FolderTreeController(TreeView treeView, FolderExplorer explorer)
         {
             _treeView = treeView;
@@ -80,6 +85,31 @@ namespace MainForm
             _timer = new System.Windows.Forms.Timer { Interval = 300 };
             _timer.Tick += OnTimerTick;
             _timer.Start();
+        }
+
+        /// <summary>
+        /// Swaps the owner-drawn state colors to the given theme's, re-themes the native control's
+        /// own chrome (scrollbar/glyphs) to match, and repaints immediately - the next timer tick
+        /// alone isn't enough, since a node whose text hasn't changed (e.g. everything after a
+        /// completed scan, nothing left updating) would otherwise keep showing stale colors
+        /// indefinitely.
+        /// </summary>
+        public void SetTheme(AppTheme theme)
+        {
+            _theme = theme;
+            ApplyNativeTreeTheme(theme);
+            _treeView.Invalidate();
+        }
+
+        private void ApplyNativeTreeTheme(AppTheme theme)
+        {
+            if (!_treeView.IsHandleCreated)
+            {
+                _treeView.HandleCreated += (_, _) => ApplyNativeTreeTheme(theme);
+                return;
+            }
+
+            SetWindowTheme(_treeView.Handle, theme == AppTheme.Dark ? "DarkMode_Explorer" : "Explorer", null);
         }
 
         private void EnableNativeDoubleBuffering()
@@ -285,11 +315,11 @@ namespace MainForm
             {
                 return new NodeDisplay([
                     (name, _treeView.ForeColor),
-                    (" (Pending...)", PendingColor),
+                    (" (Pending...)", _theme.PendingColor),
                 ]);
             }
 
-            var sizeColor = state == NodeState.Scanning ? ScanningColor : SizeColor;
+            var sizeColor = state == NodeState.Scanning ? _theme.ScanningColor : _theme.SizeColor;
             var size = MainForm.FormatBytes(node.FileBytes);
             var counts = $"{MainForm.FormatCount(node.FolderCount)} folders, {MainForm.FormatCount(node.FileCount)} files";
 
@@ -302,10 +332,10 @@ namespace MainForm
             if (TryBuildHotPathSegment(node.FileBytes, out var hotPathSegment))
                 segments.Add(hotPathSegment);
 
-            segments.Add(($"  ({counts})", CountsColor));
+            segments.Add(($"  ({counts})", _theme.CountsColor));
 
             if (state == NodeState.Scanning)
-                segments.Add((" (Scanning...)", ScanningColor));
+                segments.Add((" (Scanning...)", _theme.ScanningColor));
 
             return new NodeDisplay(segments);
         }
@@ -324,7 +354,7 @@ namespace MainForm
             if (percent < WarmFraction * 100)
                 return false;
 
-            var color = percent >= HotFraction * 100 ? HotColor : WarmColor;
+            var color = percent >= HotFraction * 100 ? _theme.HotColor : _theme.WarmColor;
             segment = ($" ({percent:F1}% of disk)", color);
             return true;
         }

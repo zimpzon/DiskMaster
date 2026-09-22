@@ -1,26 +1,135 @@
-﻿using DiskMasterLib;
+﻿using System.Runtime.InteropServices;
+using DiskMasterLib;
 
 namespace MainForm
 {
     public partial class MainForm : Form
     {
+        // Windows 10 (2004+)/11 native dark title bar - the standard, documented way to get the
+        // non-client frame (title bar, min/max/close buttons) to follow a dark theme, since WinForms
+        // has no managed API for it. 20 is the modern attribute ID; 19 is the same attribute on
+        // older Windows 10 builds before it was renumbered, tried as a fallback.
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+        private const uint SWP_FRAMECHANGED_ONLY = 0x0002 | 0x0001 | 0x0004 | 0x0020; // NOMOVE|NOSIZE|NOZORDER|FRAMECHANGED
+
         private readonly FolderExplorer _folderExplorer;
         private readonly FolderTreeController _folderTreeController;
         private bool _scannerAborted;
         private int _updateModulus;
+        private bool _isDarkMode = true;
+        private AppTheme _currentTheme = AppTheme.Light;
 
         public MainForm(FolderExplorerFactory folderExplorerFactory)
         {
             InitializeComponent();
+
+            foreach (var button in new[] { BtnRun, BtnPause, BtnStop, BtnBrowse, BtnTheme })
+                button.Paint += Button_PaintOverDisabledText;
 
             _folderExplorer = folderExplorerFactory.Create(OnScannerRunStateChanged, OnScannerNodeUpdated, OnScannerCompleted);
             _folderTreeController = new FolderTreeController(TvFolderView, _folderExplorer);
             PopulateRootFolderChoices();
             UpdateActionButtonStates(_folderExplorer.RunState);
             UpdateScannerStateLabel(_folderExplorer.RunState);
+            ApplyTheme();
         }
 
         // ---- Button handlers ----
+
+        private void BtnTheme_Click(object sender, EventArgs e)
+        {
+            _isDarkMode = !_isDarkMode;
+            ApplyTheme();
+        }
+
+        /// <summary>
+        /// Applies the current theme to every control. Buttons default to OS-visual-style rendering
+        /// (FlatStyle.Standard + UseVisualStyleBackColor), which ignores BackColor/ForeColor
+        /// overrides entirely - switching to Flat with UseVisualStyleBackColor = false is what
+        /// actually makes our colors take effect, done unconditionally (not just for dark mode) so
+        /// toggling back to light doesn't need to separately restore the original rendering mode.
+        /// </summary>
+        private void ApplyTheme()
+        {
+            var theme = _isDarkMode ? AppTheme.Dark : AppTheme.Light;
+            _currentTheme = theme;
+            BtnTheme.Text = _isDarkMode ? "Light Mode" : "Dark Mode";
+
+            BackColor = theme.FormBackColor;
+            ForeColor = theme.FormForeColor;
+
+            PanelButtons.BackColor = theme.FormBackColor;
+            PanelButtons.ForeColor = theme.FormForeColor;
+            LabFolderPrompt.ForeColor = theme.FormForeColor;
+
+            foreach (var button in new[] { BtnRun, BtnPause, BtnStop, BtnBrowse, BtnTheme })
+            {
+                button.BackColor = theme.ControlBackColor;
+                button.ForeColor = theme.ControlForeColor;
+                button.FlatStyle = FlatStyle.Flat;
+                button.UseVisualStyleBackColor = false;
+                button.FlatAppearance.BorderColor = theme.ControlForeColor;
+                button.Invalidate(); // repaint now so a currently-disabled button's text recolors immediately
+            }
+
+            CmbRootFolder.BackColor = theme.ControlBackColor;
+            CmbRootFolder.ForeColor = theme.ControlForeColor;
+
+            TvFolderView.BackColor = theme.TreeBackColor;
+            TvFolderView.ForeColor = theme.TreeForeColor;
+
+            StatusStripMain.BackColor = theme.FormBackColor;
+            StatusStripMain.ForeColor = theme.FormForeColor;
+            foreach (ToolStripItem item in StatusStripMain.Items)
+                item.ForeColor = theme.FormForeColor;
+
+            _folderTreeController.SetTheme(theme);
+            ApplyTitleBarTheme(_isDarkMode);
+        }
+
+        /// <summary>
+        /// A disabled Button's built-in text rendering derives its embossed shadow/highlight colors
+        /// from BackColor via ControlPaint.Dark/Light, completely ignoring ForeColor - on our dark
+        /// theme's near-black BackColor, Dark(BackColor) comes out nearly indistinguishable from
+        /// BackColor itself (verified: Dark(45,45,48) = (15,15,17)), so disabled text is effectively
+        /// invisible no matter what ForeColor is set to. There's no built-in way to override just
+        /// that, so repaint over it ourselves with DisabledForeColor once the base rendering is done.
+        /// </summary>
+        private void Button_PaintOverDisabledText(object? sender, PaintEventArgs e)
+        {
+            if (sender is not Button button || button.Enabled)
+                return;
+
+            using var backBrush = new SolidBrush(button.BackColor);
+            e.Graphics.FillRectangle(backBrush, Rectangle.Inflate(button.ClientRectangle, -2, -2));
+            TextRenderer.DrawText(e.Graphics, button.Text, button.Font, button.ClientRectangle, _currentTheme.DisabledForeColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        private void ApplyTitleBarTheme(bool dark)
+        {
+            if (!IsHandleCreated)
+            {
+                HandleCreated += (_, _) => ApplyTitleBarTheme(dark);
+                return;
+            }
+
+            var useDark = dark ? 1 : 0;
+            if (DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDark, sizeof(int)) != 0)
+                DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ref useDark, sizeof(int));
+
+            // DWM doesn't always repaint the frame on its own after the attribute changes while the
+            // window is already visible - force it to.
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_FRAMECHANGED_ONLY);
+        }
 
         private void PopulateRootFolderChoices()
         {

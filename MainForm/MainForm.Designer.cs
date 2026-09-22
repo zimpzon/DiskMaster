@@ -36,6 +36,7 @@
             BtnRun = new Button();
             BtnPause = new Button();
             BtnStop = new Button();
+            BtnTheme = new Button();
             StatusStripMain = new StatusStrip();
             SslScannerState = new ToolStripStatusLabel();
             SslCurrentFolder = new ToolStripStatusLabel();
@@ -64,6 +65,7 @@
             PanelButtons.Controls.Add(BtnRun);
             PanelButtons.Controls.Add(BtnPause);
             PanelButtons.Controls.Add(BtnStop);
+            PanelButtons.Controls.Add(BtnTheme);
             PanelButtons.Dock = DockStyle.Top;
             PanelButtons.Location = new Point(0, 0);
             PanelButtons.Name = "PanelButtons";
@@ -132,6 +134,17 @@
             BtnStop.Text = "Stop";
             BtnStop.UseVisualStyleBackColor = true;
             BtnStop.Click += BtnStop_Click;
+            //
+            // BtnTheme
+            //
+            BtnTheme.Location = new Point(971, 15);
+            BtnTheme.Margin = new Padding(20, 3, 3, 3);
+            BtnTheme.Name = "BtnTheme";
+            BtnTheme.Size = new Size(112, 34);
+            BtnTheme.TabIndex = 6;
+            BtnTheme.Text = "Dark Mode";
+            BtnTheme.UseVisualStyleBackColor = true;
+            BtnTheme.Click += BtnTheme_Click;
             //
             // StatusStripMain
             //
@@ -231,6 +244,7 @@
         private Button BtnRun;
         private Button BtnPause;
         private Button BtnStop;
+        private Button BtnTheme;
         private StatusStrip StatusStripMain;
         private ToolStripStatusLabel SslScannerState;
         private ToolStripStatusLabel SslFoldersInQueue;
