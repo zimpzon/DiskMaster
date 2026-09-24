@@ -19,14 +19,23 @@ namespace MainForm
     {
         // Hot-path highlighting thresholds: how big a slice of the *whole disk* a node's bytes
         // represent - not the scan total, so it stays meaningful even when scanning a subfolder -
-        // shown only once it crosses WarmFraction, colored deeper past HotFraction. Since FileBytes
-        // already rolls up cumulatively to every ancestor, this needs no extra bookkeeping: a hot
-        // folder buried three levels down naturally makes its parent, grandparent, etc. show an
-        // elevated percentage too, guiding a look downward without needing to single out "the one
-        // biggest path" - however many hot spots exist, wherever they are, they light up as soon as
-        // their branch is expanded.
+        // shown only once it crosses WarmFraction, as a small usage bar colored deeper past
+        // HotFraction. Since FileBytes already rolls up cumulatively to every ancestor, this needs
+        // no extra bookkeeping: a hot folder buried three levels down naturally makes its parent,
+        // grandparent, etc. show an elevated bar too, guiding a look downward without needing to
+        // single out "the one biggest path" - however many hot spots exist, wherever they are, they
+        // light up as soon as their branch is expanded.
         private const double WarmFraction = 0.01;
         private const double HotFraction = 0.05;
+
+        // The hot-path bar itself: a fixed-width strip drawn after a node's text, filled with
+        // HotPathBarTotalColor (the whole disk) and overlaid with Warm/HotColor up to how much of
+        // that the node's bytes represent. Skipped entirely (see OnDrawNode) when there isn't
+        // HotPathBarMinWidth of room left in the row, rather than drawing an unreadably thin sliver.
+        private const int HotPathBarWidth = 70;
+        private const int HotPathBarHeight = 10;
+        private const int HotPathBarGap = 8;
+        private const int HotPathBarMinWidth = 12;
 
         // Control.DoubleBuffered (the usual WinForms flicker fix) does nothing for TreeView: it
         // only affects WinForms' own OnPaint pipeline, and TreeView delegates its actual rendering
@@ -53,7 +62,10 @@ namespace MainForm
         /// size, counts and status each carry their own color instead of just one color for the
         /// whole line.
         /// </summary>
-        private readonly record struct NodeDisplay(IReadOnlyList<(string Text, Color Color)> Segments)
+        private readonly record struct NodeDisplay(
+            IReadOnlyList<(string Text, Color Color)> Segments,
+            double? HotPathFraction = null,
+            bool HotPathIsHot = false)
         {
             public string FullText => string.Concat(Segments.Select(s => s.Text));
         }
@@ -277,6 +289,51 @@ namespace MainForm
                 TextRenderer.DrawText(e.Graphics, text, font, rect, isSelected ? SystemColors.HighlightText : color, flags);
                 x += width;
             }
+
+            if (display.HotPathFraction is double fraction)
+                DrawHotPathBar(e.Graphics, x, bounds, fraction, display.HotPathIsHot);
+        }
+
+        /// <summary>
+        /// A usage bar alongside the "(N.N% of disk)" text: a fixed-width rectangle filled with
+        /// HotPathBarTotalColor (the whole disk), overlaid from the left with Warm/HotColor for
+        /// however much of that this node's bytes represent - a visual read of "how full" to
+        /// accompany the exact number. Skipped if there's less than HotPathBarMinWidth of room left
+        /// in the row (e.g. a deeply nested tree) rather than drawing an unreadable sliver.
+        ///
+        /// The available-width check deliberately uses the TreeView's own client width, not
+        /// bounds.Right: in OwnerDrawText mode, DrawTreeNodeEventArgs.Bounds is sized to the node's
+        /// *label text*, not the full row, so bounds.Right lands right where the text ends (with
+        /// barely any slack) - using it here made the bar's available-width check fail almost every
+        /// time and silently skip drawing it, found only by noticing the bar never actually
+        /// appeared in the running app despite an isolated bitmap-rendering diagnostic (which had
+        /// no such width constraint) passing.
+        /// </summary>
+        private void DrawHotPathBar(Graphics g, int x, Rectangle bounds, double fraction, bool isHot)
+        {
+            var barX = x + HotPathBarGap;
+            var rowRight = _treeView.ClientSize.Width;
+            var barWidth = Math.Min(HotPathBarWidth, rowRight - barX);
+            if (barWidth < HotPathBarMinWidth)
+                return;
+
+            var barY = bounds.Top + (bounds.Height - HotPathBarHeight) / 2;
+            var barRect = new Rectangle(barX, barY, barWidth, HotPathBarHeight);
+            // At least 2px, not 1: the border stroke drawn below overwrites the bar's leftmost
+            // column (its left edge lands exactly on top of the used-fill's own left edge), so a
+            // 1px-wide sliver at a low-but-shown fraction would be entirely hidden under it -
+            // verified by rendering a 2%-fraction bar to a bitmap and finding no used-color pixels
+            // at all with a 1px minimum.
+            var usedWidth = Math.Min(barWidth, Math.Max(2, (int)Math.Round(barWidth * fraction)));
+
+            using (var totalBrush = new SolidBrush(_theme.HotPathBarTotalColor))
+                g.FillRectangle(totalBrush, barRect);
+
+            using (var usedBrush = new SolidBrush(isHot ? _theme.HotColor : _theme.WarmColor))
+                g.FillRectangle(usedBrush, new Rectangle(barRect.X, barRect.Y, usedWidth, barRect.Height));
+
+            using var borderPen = new Pen(_theme.HotPathBarBorderColor);
+            g.DrawRectangle(borderPen, barRect.X, barRect.Y, barRect.Width - 1, barRect.Height - 1);
         }
 
         private void PopulateChildren(TreeNode treeNode, IScanningNode node)
@@ -329,33 +386,37 @@ namespace MainForm
                 ($" \u2014 {size}", sizeColor),
             };
 
-            if (TryBuildHotPathSegment(node.FileBytes, out var hotPathSegment))
-                segments.Add(hotPathSegment);
+            var hasHotPath = TryGetHotPathInfo(node.FileBytes, out var percent, out var fraction, out var isHot);
+            if (hasHotPath)
+                segments.Add(($" ({percent:F1}% of disk)", isHot ? _theme.HotColor : _theme.WarmColor));
 
             segments.Add(($"  ({counts})", _theme.CountsColor));
 
             if (state == NodeState.Scanning)
                 segments.Add((" (Scanning...)", _theme.ScanningColor));
 
-            return new NodeDisplay(segments);
+            return hasHotPath ? new NodeDisplay(segments, fraction, isHot) : new NodeDisplay(segments);
         }
 
-        private bool TryBuildHotPathSegment(long fileBytes, out (string Text, Color Color) segment)
+        private bool TryGetHotPathInfo(long fileBytes, out double percent, out double fraction, out bool isHot)
         {
-            segment = default;
+            percent = 0;
+            fraction = 0;
+            isHot = false;
             if (_diskSizeBytes <= 0)
                 return false;
 
             // Round to the displayed precision *before* comparing against the thresholds, not
             // after - otherwise two values that round to the same displayed "5.0%" could land on
-            // opposite sides of the Warm/Hot cutoff and show different colors for identical text
-            // (the same rounding-vs-threshold mismatch fixed earlier in FormatBytes/FormatCount).
-            var percent = Math.Round((double)fileBytes / _diskSizeBytes * 100, 1);
+            // opposite sides of the Warm/Hot cutoff and show a different color for what reads as
+            // the same amount (the same rounding-vs-threshold mismatch fixed earlier in
+            // FormatBytes/FormatCount).
+            percent = Math.Round((double)fileBytes / _diskSizeBytes * 100, 1);
             if (percent < WarmFraction * 100)
                 return false;
 
-            var color = percent >= HotFraction * 100 ? _theme.HotColor : _theme.WarmColor;
-            segment = ($" ({percent:F1}% of disk)", color);
+            isHot = percent >= HotFraction * 100;
+            fraction = Math.Min(percent / 100.0, 1.0);
             return true;
         }
 

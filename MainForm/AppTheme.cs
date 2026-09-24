@@ -22,6 +22,8 @@
         public required Color CountsColor { get; init; }
         public required Color WarmColor { get; init; }
         public required Color HotColor { get; init; }
+        public required Color HotPathBarTotalColor { get; init; }
+        public required Color HotPathBarBorderColor { get; init; }
 
         public static readonly AppTheme Light = new()
         {
@@ -39,6 +41,8 @@
             CountsColor = Color.SteelBlue,
             WarmColor = Color.IndianRed,
             HotColor = Color.Firebrick,
+            HotPathBarTotalColor = Color.FromArgb(60, 160, 90),
+            HotPathBarBorderColor = Color.FromArgb(110, 110, 110),
         };
 
         // Same background shades VS/VS Code use for their dark theme - a well-known, safe default
@@ -64,6 +68,10 @@
             CountsColor = Color.LightSkyBlue,
             WarmColor = Color.LightSalmon,
             HotColor = Color.OrangeRed,
+            // Brighter than the light theme's so it still reads as "green" against a near-black
+            // row background rather than going muddy.
+            HotPathBarTotalColor = Color.FromArgb(70, 180, 110),
+            HotPathBarBorderColor = Color.FromArgb(150, 150, 150),
         };
     }
 }
